@@ -1,0 +1,21 @@
+{
+  "bindings": [
+    {
+      "_comment": "Run every 6 hours at minute 0. Cron in NCRONTAB format (Function Apps).",
+      "name": "timer",
+      "type": "timerTrigger",
+      "direction": "in",
+      "schedule": "0 0 */6 * * *"
+    },
+    {
+      "_comment": "Cosmos output binding -- written via SDK in code rather than this binding to support per-doc upsert with partition key. Binding declared here for completeness/discoverability.",
+      "name": "userTierDocs",
+      "type": "cosmosDB",
+      "direction": "out",
+      "connection": "CitadelCosmosConnection",
+      "databaseName": "ai-usage-db",
+      "containerName": "user-tier",
+      "createIfNotExists": false
+    }
+  ]
+}

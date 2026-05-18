@@ -1,0 +1,77 @@
+{
+  "_comment": "Citadel patch for `_upstream/src/usage-ingestion-logicapp/ai-usage-ingestion/workflow.json`. NOT a full workflow — only the new actions added by Citadel. Insert these after the existing 'Parse_Usage_Event' action and before the existing Cosmos write to `ai-usage`. The existing path to ai-usage container is preserved untouched.",
+  "patches": [
+    {
+      "_comment": "1) Project the Citadel-specific monthly aggregation key.",
+      "name": "Project_userOid_userUpn_month",
+      "type": "Compose",
+      "inputs": {
+        "oid": "@triggerBody()?['userOid']",
+        "upn": "@triggerBody()?['userUpn']",
+        "month": "@formatDateTime(triggerBody()?['timestamp'], 'yyyy-MM')",
+        "model": "@coalesce(triggerBody()?['model'], 'unknown')",
+        "totalTokens": "@coalesce(triggerBody()?['totalTokens'], 0)",
+        "docId": "@concat(triggerBody()?['userOid'], ':', formatDateTime(triggerBody()?['timestamp'], 'yyyy-MM'), ':', coalesce(triggerBody()?['model'], 'unknown'))"
+      },
+      "runAfter": {
+        "Parse_Usage_Event": [ "Succeeded" ]
+      }
+    },
+    {
+      "_comment": "2) Patch-upsert the monthly counter. Add op increments totalTokens by event delta. If the doc does not exist, fallback to a full upsert (handled by the secondary action below).",
+      "name": "Upsert_ai_usage_monthly",
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": { "name": "@parameters('$connections')['azureCosmosDB']['connectionId']" }
+        },
+        "method": "patch",
+        "path": "/v2/cosmosdb/@{encodeURIComponent('AccountNameFromSettings')}/dbs/@{encodeURIComponent('ai-usage-db')}/colls/@{encodeURIComponent('ai-usage-monthly')}/docs/@{encodeURIComponent(outputs('Project_userOid_userUpn_month')['docId'])}",
+        "headers": {
+          "x-ms-documentdb-partitionkey": "[\"@{outputs('Project_userOid_userUpn_month')['oid']}\"]"
+        },
+        "body": {
+          "operations": [
+            { "op": "add", "path": "/totalTokens", "value": "@outputs('Project_userOid_userUpn_month')['totalTokens']" },
+            { "op": "set", "path": "/oid",         "value": "@outputs('Project_userOid_userUpn_month')['oid']" },
+            { "op": "set", "path": "/upn",         "value": "@outputs('Project_userOid_userUpn_month')['upn']" },
+            { "op": "set", "path": "/month",       "value": "@outputs('Project_userOid_userUpn_month')['month']" },
+            { "op": "set", "path": "/model",       "value": "@outputs('Project_userOid_userUpn_month')['model']" },
+            { "op": "set", "path": "/updatedAt",   "value": "@utcNow()" }
+          ]
+        }
+      },
+      "runAfter": {
+        "Project_userOid_userUpn_month": [ "Succeeded" ]
+      }
+    },
+    {
+      "_comment": "3) Fallback upsert if the patch failed (doc didn't exist yet).",
+      "name": "Create_ai_usage_monthly_if_missing",
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": { "name": "@parameters('$connections')['azureCosmosDB']['connectionId']" }
+        },
+        "method": "post",
+        "path": "/v2/cosmosdb/@{encodeURIComponent('AccountNameFromSettings')}/dbs/@{encodeURIComponent('ai-usage-db')}/colls/@{encodeURIComponent('ai-usage-monthly')}/docs",
+        "headers": {
+          "x-ms-documentdb-is-upsert": "true",
+          "x-ms-documentdb-partitionkey": "[\"@{outputs('Project_userOid_userUpn_month')['oid']}\"]"
+        },
+        "body": {
+          "id":          "@outputs('Project_userOid_userUpn_month')['docId']",
+          "oid":         "@outputs('Project_userOid_userUpn_month')['oid']",
+          "upn":         "@outputs('Project_userOid_userUpn_month')['upn']",
+          "month":       "@outputs('Project_userOid_userUpn_month')['month']",
+          "model":       "@outputs('Project_userOid_userUpn_month')['model']",
+          "totalTokens": "@outputs('Project_userOid_userUpn_month')['totalTokens']",
+          "updatedAt":   "@utcNow()"
+        }
+      },
+      "runAfter": {
+        "Upsert_ai_usage_monthly": [ "Failed", "TimedOut" ]
+      }
+    }
+  ]
+}

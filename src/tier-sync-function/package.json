@@ -1,0 +1,22 @@
+{
+  "name": "citadel-budgets-tier-sync",
+  "version": "1.0.0",
+  "description": "Citadel tier-sync Function — refreshes the user-tier Cosmos container from Entra groups every 6h.",
+  "main": "dist/tier-sync/index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "start": "func start"
+  },
+  "dependencies": {
+    "@azure/cosmos": "^4.1.1",
+    "@azure/functions": "^4.5.0",
+    "@azure/identity": "^4.4.1",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
+    "isomorphic-fetch": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}

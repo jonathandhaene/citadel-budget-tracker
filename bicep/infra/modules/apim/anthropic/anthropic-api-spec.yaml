@@ -1,0 +1,88 @@
+openapi: 3.0.3
+# Citadel Anthropic surface — minimal hand-written OpenAPI used by APIM `apis` resource.
+# Only the operation Claude Code uses is exposed: POST /v1/messages.
+# Schemas are intentionally loose (additionalProperties allowed) — APIM is a passthrough, not a validator.
+info:
+  title: Citadel Anthropic API
+  version: "1.0.0"
+  description: |
+    Citadel Budgets surface for Anthropic Messages API. Fronted by APIM with Entra JWT
+    validation (Claude Code app audience), per-user token budget enforcement, and Event Hub
+    usage telemetry. Backend is Microsoft Foundry Anthropic deployment, called with APIM
+    managed identity.
+servers:
+  - url: https://<apim-gateway>/anthropic
+    description: APIM Citadel Anthropic surface (production)
+paths:
+  /v1/messages:
+    post:
+      operationId: createMessage
+      summary: Create a message (Anthropic Messages API).
+      description: |
+        Mirrors https://docs.anthropic.com/en/api/messages. Request shape passes through to
+        Foundry Anthropic. If `stream: true`, response is `text/event-stream` and final
+        `usage.output_tokens` arrives in the terminal `message_delta` event.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              required: [model, messages, max_tokens]
+              properties:
+                model:       { type: string, example: claude-sonnet-4 }
+                messages:    { type: array, items: { type: object } }
+                max_tokens:  { type: integer, minimum: 1 }
+                stream:      { type: boolean, default: false }
+                system:      { type: string }
+                temperature: { type: number, minimum: 0, maximum: 1 }
+      responses:
+        "200":
+          description: OK (non-streaming JSON, or `text/event-stream` if stream=true).
+          headers:
+            x-citadel-budget-pct:
+              description: Decimal 0-1; present only above 80% threshold or "override".
+              schema: { type: string }
+            x-citadel-budget-remaining:
+              description: Remaining tokens this month.
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                properties:
+                  id:    { type: string }
+                  type:  { type: string, example: message }
+                  model: { type: string }
+                  content: { type: array, items: { type: object } }
+                  usage:
+                    type: object
+                    properties:
+                      input_tokens:  { type: integer }
+                      output_tokens: { type: integer }
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE stream of message_start / content_block_* / message_delta / message_stop events.
+        "401":
+          description: Citadel JWT validation failed.
+        "429":
+          description: |
+            Citadel monthly budget exceeded. `Retry-After` header = seconds to next month UTC.
+          headers:
+            Retry-After: { schema: { type: integer } }
+            x-citadel-budget-pct: { schema: { type: string, example: "1.0" } }
+            x-citadel-budget-remaining: { schema: { type: integer, example: 0 } }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Entra JWT issued for the Claude Code Anthropic-published Entra app. Audience MUST equal
+        the configured `claude-code-app-id` Named Value. Issuer MUST be the v2.0 endpoint.

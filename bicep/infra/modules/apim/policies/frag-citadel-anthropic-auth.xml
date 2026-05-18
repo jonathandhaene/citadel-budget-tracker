@@ -1,0 +1,63 @@
+<!--
+    Fragment: citadel-anthropic-auth
+    Forked from upstream `frag-aad-auth-custom.xml`.
+
+    Citadel deltas (vs upstream):
+      1. v2.0 issuer (`https://login.microsoftonline.com/{tid}/v2.0`) instead of v1 `sts.windows.net`.
+         Rationale: upstream uses v1 issuer (bug L7 in plan). Microsoft guidance requires v2.0 for v2.0 tokens.
+         Claude Code requests v2.0 tokens by default.
+      2. No `appid` required-claim. the customer does not own the Anthropic-published Claude Code app manifest
+         and therefore cannot guarantee the value of `appid` vs `azp`. Audience check is sufficient because
+         the audience is the Claude-Code-specific app ID — only Claude Code tokens will pass.
+      3. Captures `oid` and `preferred_username` into context variables `userOid` / `userUpn` for downstream
+         budget-check + Event Hub telemetry. `oid` is the stable join key; `preferred_username` is for display.
+      4. Defensive default-deny: if `entra-auth` is not explicitly "true" we still validate (fail closed). This
+         is the opposite of the upstream default ("false" disables).
+-->
+<fragment>
+    <!-- Variables (set by API/product policy before include-fragment): -->
+    <!--   tenant-id (string)   — customer Entra tenant ID -->
+    <!--   audience  (string)   — Claude Code Anthropic-published app ID (= D1 audience) -->
+
+    <set-variable name="tenant-id" value="@(context.Variables.GetValueOrDefault("tenant-id", ""))" />
+    <set-variable name="audience"  value="@(context.Variables.GetValueOrDefault("audience", ""))" />
+
+    <validate-jwt header-name="Authorization"
+                  failed-validation-httpcode="401"
+                  failed-validation-error-message="Unauthorized: Citadel JWT validation failed"
+                  require-expiration-time="true"
+                  require-scheme="Bearer"
+                  require-signed-tokens="true"
+                  output-token-variable-name="citadel-jwt">
+        <openid-config url="@($"https://login.microsoftonline.com/{context.Variables["tenant-id"]}/v2.0/.well-known/openid-configuration")" />
+        <audiences>
+            <audience>@((string)context.Variables["audience"])</audience>
+        </audiences>
+        <issuers>
+            <!-- v2.0 issuer ONLY. Upstream uses sts.windows.net (v1) — that is wrong for v2.0 tokens. -->
+            <issuer>@($"https://login.microsoftonline.com/{context.Variables["tenant-id"]}/v2.0")</issuer>
+        </issuers>
+        <!-- NOTE: no <required-claims> — see header comment, point 2. -->
+    </validate-jwt>
+
+    <!-- Project `oid` + `preferred_username` for downstream consumers (budget-check, usage emit). -->
+    <set-variable name="userOid" value="@{
+        var jwt = (Jwt)context.Variables["citadel-jwt"];
+        return jwt.Claims.GetValueOrDefault("oid", "");
+    }" />
+    <set-variable name="userUpn" value="@{
+        var jwt = (Jwt)context.Variables["citadel-jwt"];
+        return jwt.Claims.GetValueOrDefault("preferred_username",
+               jwt.Claims.GetValueOrDefault("upn", ""));
+    }" />
+
+    <!-- Fail closed if `oid` is missing (should never happen for a valid v2 user token, but guards against
+         app-only tokens which carry no `oid`). -->
+    <choose>
+        <when condition="@(string.IsNullOrEmpty((string)context.Variables["userOid"]))">
+            <return-response>
+                <set-status code="401" reason="Unauthorized: missing oid claim (app-only tokens are not accepted)" />
+            </return-response>
+        </when>
+    </choose>
+</fragment>

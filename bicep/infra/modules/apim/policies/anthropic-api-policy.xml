@@ -1,0 +1,68 @@
+<!--
+    API policy: Citadel Anthropic surface (`POST /v1/messages`)
+
+    Inbound:
+      1. Initialize Citadel variables (tenant, audience, model).
+      2. Include `citadel-anthropic-auth` (validates Entra JWT, projects userOid/userUpn).
+      3. Strip inbound `Authorization` header (D1 — never forward user JWT to Foundry).
+      4. Include `citadel-budget-check` (D2/D3/D4 enforcement).
+      5. Apply APIM-MI bearer for Foundry call.
+
+    Outbound:
+      6. If isStream=true -> `citadel-anthropic-usage-streaming`, else `citadel-anthropic-usage`.
+      7. Increment `ai-usage-monthly` Cosmos doc (best-effort; Logic App is the authoritative writer).
+
+    On-error: base only.
+-->
+<policies>
+    <inbound>
+        <base />
+
+        <!-- 1) Variables (resolved from Named Values at deploy time). -->
+        <set-variable name="tenant-id" value="{{customer-tenant-id}}" />
+        <set-variable name="audience"  value="{{claude-code-app-id}}" />
+        <!-- Capture model from request body for budget-check + usage emit. -->
+        <set-variable name="reqBody" value="@(context.Request.Body.As<JObject>(preserveContent: true))" />
+        <set-variable name="model"    value="@(((JObject)context.Variables["reqBody"])["model"]?.ToString() ?? "unknown")" />
+        <set-variable name="isStream" value="@((((JObject)context.Variables["reqBody"])["stream"]?.ToObject<bool>() ?? false) ? "true" : "false")" />
+
+        <!-- 2) Auth -->
+        <include-fragment fragment-id="citadel-anthropic-auth" />
+
+        <!-- 3) Strip inbound Authorization (D1). -->
+        <set-header name="Authorization" exists-action="delete" />
+
+        <!-- 4) Budget enforcement (may short-circuit with 429). -->
+        <set-variable name="cosmosBudgetsUrl"  value="{{citadel-cosmos-budgets-url}}" />
+        <set-variable name="cosmosUserTierUrl" value="{{citadel-cosmos-user-tier-url}}" />
+        <set-variable name="cosmosUsageUrl"    value="{{citadel-cosmos-usage-url}}" />
+        <set-variable name="cosmosAuthHeader"  value="{{citadel-cosmos-auth-header}}" />
+        <include-fragment fragment-id="citadel-budget-check" />
+
+        <!-- 5) APIM-MI bearer for Foundry (replaces the stripped user token). -->
+        <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+    </inbound>
+
+    <backend>
+        <base />
+    </backend>
+
+    <outbound>
+        <base />
+        <!-- 6) Usage emit -->
+        <choose>
+            <when condition="@((string)context.Variables["isStream"] == "true")">
+                <include-fragment fragment-id="citadel-anthropic-usage-streaming" />
+            </when>
+            <otherwise>
+                <include-fragment fragment-id="citadel-anthropic-usage" />
+            </otherwise>
+        </choose>
+        <!-- 7) Best-effort outbound increment to ai-usage-monthly is handled by the Logic App ingestion
+                 (authoritative path). We rely on cache 30s TTL to bound over-budget bleed. -->
+    </outbound>
+
+    <on-error>
+        <base />
+    </on-error>
+</policies>

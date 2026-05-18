@@ -1,0 +1,184 @@
+<!--
+    Fragment: citadel-budget-check
+    Implements D2 (precedence) + D3 (cache) + D4 (enforcement).
+
+    Inputs (variables set by caller):
+      userOid       — from auth fragment
+      model         — request model name (e.g. "claude-sonnet-4")
+      cosmosBudgetsUrl   — full URL to Cosmos `budgets` container query endpoint  (Named Value)
+      cosmosUserTierUrl  — full URL to Cosmos `user-tier` container query endpoint (Named Value)
+      cosmosAuthHeader   — APIM-MI bearer for Cosmos data plane (Named Value or set-variable)
+
+    Precedence (locked, D2):
+        (oid, model) -> (oid, "*") -> (tier, model) -> (tier, "*") -> global
+
+    Cache (D3): 30s TTL. Key MUST include `oid` (Risk #4 — cross-user bleed).
+
+    Enforcement (D4):
+        pct < 0.80   -> pass, no headers
+        0.80 <= pct < 1.0 -> pass + warning headers
+        pct >= 1.0   -> 429 with Retry-After = seconds-until-next-month-UTC
+        adminOverride=true on the resolved budget doc -> bypass entirely
+
+    NOTE: outbound counter increment happens in the API policy after a successful 200 response —
+          NOT here. This fragment is read-only.
+-->
+<fragment>
+    <!-- 1) Try cache first (key includes oid — Risk #4). -->
+    <cache-lookup-value key="@("citadel-budget:" + (string)context.Variables["userOid"] + ":" + (string)context.Variables.GetValueOrDefault<string>("model","*"))"
+                        variable-name="cachedBudget" />
+
+    <choose>
+        <when condition="@(context.Variables.ContainsKey("cachedBudget"))">
+            <!-- cache hit: skip Cosmos round-trip -->
+        </when>
+        <otherwise>
+            <!-- 2) Resolve user's tier from `user-tier` container. -->
+            <send-request mode="new" response-variable-name="tierResp" timeout="5" ignore-error="true">
+                <set-url>@((string)context.Variables["cosmosUserTierUrl"] + "/docs/" + (string)context.Variables["userOid"])</set-url>
+                <set-method>GET</set-method>
+                <set-header name="Authorization" exists-action="override">
+                    <value>@((string)context.Variables["cosmosAuthHeader"])</value>
+                </set-header>
+                <set-header name="x-ms-documentdb-partitionkey" exists-action="override">
+                    <value>@("[\"" + (string)context.Variables["userOid"] + "\"]")</value>
+                </set-header>
+            </send-request>
+            <set-variable name="resolvedTier" value="@{
+                try {
+                    var resp = (IResponse)context.Variables["tierResp"];
+                    if (resp != null && resp.StatusCode == 200) {
+                        return ((JObject)resp.Body.As<JObject>(preserveContent: true))["tier"]?.ToString() ?? "bronze";
+                    }
+                } catch {}
+                return "bronze"; // fail-safe default to lowest tier
+            }" />
+
+            <!-- 3) Walk the precedence chain via a single SQL-style Cosmos query. -->
+            <send-request mode="new" response-variable-name="budgetResp" timeout="5" ignore-error="true">
+                <set-url>@((string)context.Variables["cosmosBudgetsUrl"])</set-url>
+                <set-method>POST</set-method>
+                <set-header name="Authorization" exists-action="override">
+                    <value>@((string)context.Variables["cosmosAuthHeader"])</value>
+                </set-header>
+                <set-header name="Content-Type" exists-action="override"><value>application/query+json</value></set-header>
+                <set-header name="x-ms-documentdb-isquery" exists-action="override"><value>true</value></set-header>
+                <set-header name="x-ms-documentdb-query-enablecrosspartition" exists-action="override"><value>true</value></set-header>
+                <set-body>@{
+                    var oid   = (string)context.Variables["userOid"];
+                    var model = (string)context.Variables.GetValueOrDefault<string>("model","*");
+                    var tier  = (string)context.Variables["resolvedTier"];
+                    // 5 candidate scopes ordered by precedence:
+                    var scopes = new JArray(
+                        "user:" + oid + ":" + model,
+                        "user:" + oid + ":*",
+                        "tier:" + tier + ":" + model,
+                        "tier:" + tier + ":*",
+                        "global:*:*"
+                    );
+                    return new JObject(
+                        new JProperty("query", "SELECT * FROM c WHERE c.scope IN (@s0,@s1,@s2,@s3,@s4)"),
+                        new JProperty("parameters", new JArray(
+                            new JObject(new JProperty("name","@s0"), new JProperty("value", scopes[0])),
+                            new JObject(new JProperty("name","@s1"), new JProperty("value", scopes[1])),
+                            new JObject(new JProperty("name","@s2"), new JProperty("value", scopes[2])),
+                            new JObject(new JProperty("name","@s3"), new JProperty("value", scopes[3])),
+                            new JObject(new JProperty("name","@s4"), new JProperty("value", scopes[4]))
+                        ))
+                    ).ToString();
+                }</set-body>
+            </send-request>
+            <set-variable name="cachedBudget" value="@{
+                // Pick the first scope in precedence order that returned a doc.
+                var precedence = new[] {
+                    "user:" + (string)context.Variables["userOid"] + ":" + (string)context.Variables.GetValueOrDefault<string>("model","*"),
+                    "user:" + (string)context.Variables["userOid"] + ":*",
+                    "tier:" + (string)context.Variables["resolvedTier"] + ":" + (string)context.Variables.GetValueOrDefault<string>("model","*"),
+                    "tier:" + (string)context.Variables["resolvedTier"] + ":*",
+                    "global:*:*"
+                };
+                try {
+                    var resp = (IResponse)context.Variables["budgetResp"];
+                    if (resp == null || resp.StatusCode != 200) return "{\"monthlyTokenLimit\":0,\"adminOverride\":false,\"scope\":\"none\"}";
+                    var docs = (JArray)resp.Body.As<JObject>(preserveContent: true)["Documents"];
+                    foreach (var s in precedence) {
+                        foreach (JObject d in docs) {
+                            if ((string)d["scope"] == s) return d.ToString();
+                        }
+                    }
+                } catch {}
+                return "{\"monthlyTokenLimit\":0,\"adminOverride\":false,\"scope\":\"none\"}";
+            }" />
+            <cache-store-value key="@("citadel-budget:" + (string)context.Variables["userOid"] + ":" + (string)context.Variables.GetValueOrDefault<string>("model","*"))"
+                               value="@((string)context.Variables["cachedBudget"])"
+                               duration="30" />
+        </otherwise>
+    </choose>
+
+    <!-- 4) Resolve current month-to-date consumption from `ai-usage-monthly`. -->
+    <set-variable name="usageDocId" value="@((string)context.Variables["userOid"] + ":" + DateTime.UtcNow.ToString("yyyy-MM") + ":" + (string)context.Variables.GetValueOrDefault<string>("model","*"))" />
+    <send-request mode="new" response-variable-name="usageResp" timeout="5" ignore-error="true">
+        <set-url>@((string)context.Variables["cosmosUsageUrl"] + "/docs/" + (string)context.Variables["usageDocId"])</set-url>
+        <set-method>GET</set-method>
+        <set-header name="Authorization" exists-action="override"><value>@((string)context.Variables["cosmosAuthHeader"])</value></set-header>
+        <set-header name="x-ms-documentdb-partitionkey" exists-action="override">
+            <value>@("[\"" + (string)context.Variables["userOid"] + "\"]")</value>
+        </set-header>
+    </send-request>
+    <set-variable name="usedTokens" value="@{
+        try {
+            var resp = (IResponse)context.Variables["usageResp"];
+            if (resp != null && resp.StatusCode == 200) {
+                return (int?)resp.Body.As<JObject>(preserveContent: true)["totalTokens"] ?? 0;
+            }
+        } catch {}
+        return 0;
+    }" />
+
+    <!-- 5) Compute pct and enforce. -->
+    <set-variable name="budgetObj" value="@(JObject.Parse((string)context.Variables["cachedBudget"]))" />
+    <set-variable name="limit"     value="@((int?)((JObject)context.Variables["budgetObj"])["monthlyTokenLimit"] ?? 0)" />
+    <set-variable name="adminOverride" value="@((bool?)((JObject)context.Variables["budgetObj"])["adminOverride"] ?? false)" />
+    <set-variable name="budgetPct" value="@{
+        int limit = (int)context.Variables["limit"];
+        int used  = (int)context.Variables["usedTokens"];
+        if (limit <= 0) return 0.0;
+        return Math.Round((double)used / (double)limit, 4);
+    }" />
+    <set-variable name="budgetRemaining" value="@(Math.Max(0, (int)context.Variables["limit"] - (int)context.Variables["usedTokens"]))" />
+
+    <choose>
+        <!-- adminOverride bypass -->
+        <when condition="@((bool)context.Variables["adminOverride"] == true)">
+            <set-header name="x-citadel-budget-pct" exists-action="override"><value>override</value></set-header>
+        </when>
+        <!-- 100% hard cap -->
+        <when condition="@((double)context.Variables["budgetPct"] >= 1.0)">
+            <return-response>
+                <set-status code="429" reason="Citadel monthly budget exceeded" />
+                <set-header name="Retry-After" exists-action="override"><value>@{
+                    var now = DateTime.UtcNow;
+                    var nextMonth = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(1);
+                    return ((int)(nextMonth - now).TotalSeconds).ToString();
+                }</value></set-header>
+                <set-header name="x-citadel-budget-pct" exists-action="override"><value>1.0</value></set-header>
+                <set-header name="x-citadel-budget-remaining" exists-action="override"><value>0</value></set-header>
+                <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+                <set-body>@{
+                    return new JObject(
+                        new JProperty("type", "error"),
+                        new JProperty("error", new JObject(
+                            new JProperty("type", "budget_exceeded"),
+                            new JProperty("message", "Monthly token budget exceeded. See Retry-After for reset time.")
+                        ))
+                    ).ToString();
+                }</set-body>
+            </return-response>
+        </when>
+        <!-- 80% soft warn -->
+        <when condition="@((double)context.Variables["budgetPct"] >= 0.80)">
+            <set-header name="x-citadel-budget-pct" exists-action="override"><value>@(((double)context.Variables["budgetPct"]).ToString("0.0000"))</value></set-header>
+            <set-header name="x-citadel-budget-remaining" exists-action="override"><value>@(((int)context.Variables["budgetRemaining"]).ToString())</value></set-header>
+        </when>
+    </choose>
+</fragment>

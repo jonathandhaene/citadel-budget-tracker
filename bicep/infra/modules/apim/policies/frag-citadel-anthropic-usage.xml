@@ -1,0 +1,67 @@
+<!--
+    Fragment: citadel-anthropic-usage (non-streaming)
+    Forked from upstream `frag-ai-usage.xml`.
+
+    Citadel deltas:
+      1. Reads Anthropic usage shape: response body `usage.input_tokens` + `usage.output_tokens`.
+         Maps to existing Event Hub schema:
+           usage.input_tokens   -> promptTokens
+           usage.output_tokens  -> responseTokens
+           sum                  -> totalTokens
+         This keeps PBIX dashboards + downstream Logic App schema-compatible.
+      2. Adds `userOid` + `userUpn` Event Hub fields (set by `frag-citadel-anthropic-auth`).
+      3. Emits a derived `month` field (YYYY-MM, UTC) — used by `ai-usage-monthly` Cosmos doc id construction
+         in the Logic App ingestion projection.
+-->
+<fragment>
+    <choose>
+        <when condition="@(context.Response.StatusCode == 200)">
+            <!-- Parse Anthropic usage from response body. -->
+            <set-variable name="anthropicUsage" value="@{
+                try {
+                    var body = context.Response.Body.As<JObject>(preserveContent: true);
+                    var usage = (JObject)body["usage"] ?? new JObject();
+                    int inTok  = (int?)usage["input_tokens"]  ?? 0;
+                    int outTok = (int?)usage["output_tokens"] ?? 0;
+                    return new JObject(
+                        new JProperty("input",  inTok),
+                        new JProperty("output", outTok),
+                        new JProperty("total",  inTok + outTok)
+                    ).ToString();
+                } catch { return "{\"input\":0,\"output\":0,\"total\":0}"; }
+            }" />
+            <set-variable name="promptTokens"   value="@((int)JObject.Parse((string)context.Variables["anthropicUsage"])["input"])" />
+            <set-variable name="responseTokens" value="@((int)JObject.Parse((string)context.Variables["anthropicUsage"])["output"])" />
+            <set-variable name="totalTokens"    value="@((int)JObject.Parse((string)context.Variables["anthropicUsage"])["total"])" />
+
+            <log-to-eventhub logger-id="usage-eventhub-logger">@{
+                return new JObject(
+                    new JProperty("id", (string)context.Variables.GetValueOrDefault<string>("idPrefix", "anthropic") + "-" + Guid.NewGuid().ToString()),
+                    new JProperty("timestamp", DateTime.UtcNow.ToString("o")),
+                    new JProperty("month", DateTime.UtcNow.ToString("yyyy-MM")),
+                    new JProperty("appId", (string)context.Variables.GetValueOrDefault<string>("appId", "claude-code")),
+                    new JProperty("subscriptionId", context.Subscription?.Id?.ToString() ?? "Portal-Admin"),
+                    new JProperty("productName", context.Product?.Name?.ToString() ?? "anthropic"),
+                    new JProperty("targetService", "anthropic"),
+                    new JProperty("model", (string)context.Variables.GetValueOrDefault<string>("model", "NA")),
+                    new JProperty("gatewayName", context.Deployment?.ServiceName ?? "NA"),
+                    new JProperty("gatewayRegion", context.Deployment?.Region ?? "NA"),
+                    new JProperty("aiGatewayId", context.Deployment?.Gateway?.Id ?? "NA"),
+                    new JProperty("RequestIp", context.Request?.IpAddress ?? "NA"),
+                    new JProperty("operationName", context.Operation?.Name ?? "NA"),
+                    // === Citadel additions ===
+                    new JProperty("userOid", (string)context.Variables.GetValueOrDefault<string>("userOid", "NA")),
+                    new JProperty("userUpn", (string)context.Variables.GetValueOrDefault<string>("userUpn", "NA")),
+                    // =========================
+                    new JProperty("backendId", (string)context.Variables.GetValueOrDefault<string>("backendId", "NA")),
+                    new JProperty("routeLocation", (string)context.Variables.GetValueOrDefault<string>("routeLocation", "NA")),
+                    new JProperty("routeName", (string)context.Variables.GetValueOrDefault<string>("routeName", "NA")),
+                    new JProperty("deploymentName", (string)context.Variables.GetValueOrDefault<string>("deploymentName", "NA")),
+                    new JProperty("promptTokens",   (int)context.Variables.GetValueOrDefault<int>("promptTokens", 0)),
+                    new JProperty("responseTokens", (int)context.Variables.GetValueOrDefault<int>("responseTokens", 0)),
+                    new JProperty("totalTokens",    (int)context.Variables.GetValueOrDefault<int>("totalTokens", 0))
+                ).ToString();
+            }</log-to-eventhub>
+        </when>
+    </choose>
+</fragment>

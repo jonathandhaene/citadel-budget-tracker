@@ -1,0 +1,82 @@
+<!--
+    Fragment: citadel-anthropic-usage-streaming
+    Forked from upstream `frag-openai-usage-streaming.xml`.
+
+    Anthropic SSE event sequence for `POST /v1/messages` with `stream: true`:
+      event: message_start          { message: { usage: { input_tokens: N, output_tokens: 1 } } }
+      event: content_block_start    ...
+      event: content_block_delta    ...   (repeats)
+      event: content_block_stop     ...
+      event: message_delta          { delta: {...}, usage: { output_tokens: N_final } }   <-- TERMINAL, final usage
+      event: message_stop
+
+    The terminal `message_delta` carries the final `output_tokens`. The initial `message_start` carries
+    `input_tokens` (final) and an initial `output_tokens=1`.
+
+    This fragment is intended to be called from the API outbound policy when `isStream == true`.
+    APIM's `azure-openai-emit-token-metric` does NOT support Anthropic — we hand-roll SSE parsing.
+-->
+<fragment>
+    <choose>
+        <when condition="@(context.Variables.GetValueOrDefault<string>("isStream","false").Equals("true", StringComparison.OrdinalIgnoreCase))">
+            <set-variable name="streamUsage" value="@{
+                int inTok  = 0;
+                int outTok = 0;
+                try {
+                    var raw = context.Response.Body.As<string>(preserveContent: true) ?? "";
+                    // Each SSE event is two lines: `event: <name>` + `data: <json>`. Split on blank lines.
+                    foreach (var chunk in raw.Split(new[] { "\n\n" }, StringSplitOptions.RemoveEmptyEntries)) {
+                        string evt = null; string dataLine = null;
+                        foreach (var line in chunk.Split('\n')) {
+                            if (line.StartsWith("event:")) evt = line.Substring(6).Trim();
+                            else if (line.StartsWith("data:")) dataLine = line.Substring(5).Trim();
+                        }
+                        if (string.IsNullOrEmpty(dataLine)) continue;
+                        try {
+                            var j = JObject.Parse(dataLine);
+                            if (evt == "message_start") {
+                                var u = (JObject)j["message"]?["usage"];
+                                if (u != null) {
+                                    inTok  = (int?)u["input_tokens"]  ?? inTok;
+                                    outTok = (int?)u["output_tokens"] ?? outTok;
+                                }
+                            } else if (evt == "message_delta") {
+                                var u = (JObject)j["usage"];
+                                if (u != null) {
+                                    outTok = (int?)u["output_tokens"] ?? outTok; // overwrites with terminal final
+                                }
+                            }
+                        } catch { /* skip malformed SSE chunk */ }
+                    }
+                } catch { /* fall through with zeros */ }
+                return new JObject(
+                    new JProperty("input",  inTok),
+                    new JProperty("output", outTok),
+                    new JProperty("total",  inTok + outTok)
+                ).ToString();
+            }" />
+            <set-variable name="promptTokens"   value="@((int)JObject.Parse((string)context.Variables["streamUsage"])["input"])" />
+            <set-variable name="responseTokens" value="@((int)JObject.Parse((string)context.Variables["streamUsage"])["output"])" />
+            <set-variable name="totalTokens"    value="@((int)JObject.Parse((string)context.Variables["streamUsage"])["total"])" />
+
+            <!-- Emit using the same Event Hub logger + schema as the non-streaming variant. -->
+            <log-to-eventhub logger-id="usage-eventhub-logger">@{
+                return new JObject(
+                    new JProperty("id", "anthropic-stream-" + Guid.NewGuid().ToString()),
+                    new JProperty("timestamp", DateTime.UtcNow.ToString("o")),
+                    new JProperty("month", DateTime.UtcNow.ToString("yyyy-MM")),
+                    new JProperty("targetService", "anthropic"),
+                    new JProperty("model", (string)context.Variables.GetValueOrDefault<string>("model", "NA")),
+                    new JProperty("userOid", (string)context.Variables.GetValueOrDefault<string>("userOid", "NA")),
+                    new JProperty("userUpn", (string)context.Variables.GetValueOrDefault<string>("userUpn", "NA")),
+                    new JProperty("subscriptionId", context.Subscription?.Id?.ToString() ?? "Portal-Admin"),
+                    new JProperty("productName", context.Product?.Name?.ToString() ?? "anthropic"),
+                    new JProperty("isStream", true),
+                    new JProperty("promptTokens",   (int)context.Variables["promptTokens"]),
+                    new JProperty("responseTokens", (int)context.Variables["responseTokens"]),
+                    new JProperty("totalTokens",    (int)context.Variables["totalTokens"])
+                ).ToString();
+            }</log-to-eventhub>
+        </when>
+    </choose>
+</fragment>

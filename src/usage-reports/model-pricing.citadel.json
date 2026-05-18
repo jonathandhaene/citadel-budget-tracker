@@ -1,0 +1,41 @@
+[
+    {
+        "id": "citadel-claude-haiku-3-5",
+        "model": "claude-haiku-3-5",
+        "deploymentName": "claude-haiku-3-5",
+        "isActive": true,
+        "CostPerInputUnit": 0.80,
+        "CostPerOutputUnit": 4.00,
+        "CostUnit": 1000000,
+        "BaseCost": 0,
+        "Currency": "USD",
+        "CalculationMethod": "tokens",
+        "region": "ALL"
+    },
+    {
+        "id": "citadel-claude-sonnet-4",
+        "model": "claude-sonnet-4",
+        "deploymentName": "claude-sonnet-4",
+        "isActive": true,
+        "CostPerInputUnit": 3.00,
+        "CostPerOutputUnit": 15.00,
+        "CostUnit": 1000000,
+        "BaseCost": 0,
+        "Currency": "USD",
+        "CalculationMethod": "tokens",
+        "region": "ALL"
+    },
+    {
+        "id": "citadel-claude-opus-4",
+        "model": "claude-opus-4",
+        "deploymentName": "claude-opus-4",
+        "isActive": true,
+        "CostPerInputUnit": 15.00,
+        "CostPerOutputUnit": 75.00,
+        "CostUnit": 1000000,
+        "BaseCost": 0,
+        "Currency": "USD",
+        "CalculationMethod": "tokens",
+        "region": "ALL"
+    }
+]

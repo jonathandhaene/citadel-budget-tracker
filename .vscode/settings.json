@@ -1,0 +1,13 @@
+{
+    "python.analysis.extraPaths": [
+        "c:\\Users\\jodhaene\\.vscode\\extensions\\ms-security.ms-sentinel-2.1.0\\python"
+    ],
+    "azureFunctions.deploySubpath": "src/tier-sync-function",
+    "azureFunctions.postDeployTask": "npm install (functions)",
+    "azureFunctions.projectLanguage": "TypeScript",
+    "azureFunctions.projectRuntime": "~4",
+    "debug.internalConsoleOptions": "neverOpen",
+    "azureFunctions.projectLanguageModel": 4,
+    "azureFunctions.projectSubpath": "src/tier-sync-function",
+    "azureFunctions.preDeployTask": "npm prune (functions)"
+}
