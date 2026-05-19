@@ -1,0 +1,48 @@
+{
+  "name": "Citadel Budgets Development",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+
+  "features": {
+    "ghcr.io/devcontainers/features/azure-cli:1": {
+      "version": "latest",
+      "extensions": "bicep"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.11"
+    },
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-bicep",
+        "ms-vscode.azurecli",
+        "ms-azuretools.vscode-azurefunctions",
+        "ms-python.python",
+        "ms-toolsai.jupyter",
+        "redhat.vscode-xml",
+        "esbenp.prettier-vscode",
+        "dbaeumer.vscode-eslint"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "bicep.experimental.playground": true,
+        "files.associations": {
+          "*.bicep": "bicep",
+          "*.bicepparam": "bicep"
+        }
+      }
+    }
+  },
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  "forwardPorts": [7071, 8888],
+
+  "remoteUser": "vscode"
+}

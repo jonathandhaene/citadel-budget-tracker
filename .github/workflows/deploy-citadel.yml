@@ -1,0 +1,115 @@
+name: Deploy Citadel Budgets
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'bicep/**'
+      - 'src/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  whatif:
+    name: What-If Deployment Analysis
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Run What-If
+        uses: azure/arm-deploy@v2
+        with:
+          scope: resourcegroup
+          resourceGroupName: ${{ vars.RESOURCE_GROUP_NAME }}
+          template: bicep/infra/main.citadel.bicep
+          parameters: bicep/infra/main.citadel.bicepparam
+          deploymentMode: Validate
+          additionalArguments: --what-if
+
+      - name: Comment What-If Results
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '## What-If Deployment Analysis\n\nDeployment validation completed. Review the workflow logs for detailed what-if results.'
+            })
+
+  deploy:
+    name: Deploy to Azure
+    runs-on: ubuntu-latest
+    needs: whatif
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Azure Developer CLI
+        uses: azure/setup-azd@v1
+
+      - name: Deploy Infrastructure
+        working-directory: bicep/infra
+        run: |
+          az deployment group create \
+            --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
+            --template-file main.citadel.bicep \
+            --parameters main.citadel.bicepparam \
+            --verbose
+
+      - name: Deploy tier-sync Function
+        working-directory: src/tier-sync-function
+        run: |
+          npm install
+          npm run build
+          func azure functionapp publish ${{ vars.TIER_SYNC_FUNCTION_NAME }} --typescript
+
+  validate:
+    name: Post-Deployment Validation
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Jupyter Dependencies
+        run: |
+          pip install jupyter nbconvert requests python-dotenv azure-identity
+
+      - name: Run Validation Notebooks
+        run: |
+          echo "Note: Validation notebooks require live environment - manual execution required"
+          echo "Run: jupyter nbconvert --to notebook --execute validation/*.ipynb"
+        continue-on-error: true
