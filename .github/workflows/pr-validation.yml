@@ -1,0 +1,130 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'bicep/**/*.bicep'
+      - 'bicep/**/*.bicepparam'
+      - 'bicep/**/*.xml'
+      - 'src/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  bicep-validation:
+    name: Bicep Build & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Azure CLI
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+        continue-on-error: true
+
+      - name: Install Bicep
+        run: |
+          curl -Lo bicep https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64
+          chmod +x ./bicep
+          sudo mv ./bicep /usr/local/bin/bicep
+          bicep --version
+
+      - name: Bicep Build All Files
+        run: |
+          echo "Building all Bicep files..."
+          find bicep/infra -name "*.bicep" -type f | while read file; do
+            echo "Building: $file"
+            bicep build "$file" || exit 1
+          done
+
+      - name: Bicep Lint
+        run: |
+          echo "Linting all Bicep files..."
+          find bicep/infra -name "*.bicep" -type f -exec bicep lint {} \;
+
+      - name: Check for Placeholder Values
+        run: |
+          echo "Checking for unresolved placeholders..."
+          if grep -r "<claude-code-app-id>\|<customer-tenant-id>\|<tier-group-oid" bicep/infra --include="*.bicep" --include="*.bicepparam"; then
+            echo "::warning::Found placeholder values in Bicep files. These must be replaced before deployment."
+          fi
+
+      - name: Validate Parameter Files
+        run: |
+          echo "Validating .bicepparam files..."
+          find bicep/infra -name "*.bicepparam" -type f | while read file; do
+            echo "Checking: $file"
+            if [ -f "$file" ]; then
+              echo "Parameter file exists: $file"
+            fi
+          done
+
+  typescript-validation:
+    name: TypeScript Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build tier-sync Function
+        working-directory: src/tier-sync-function
+        run: |
+          npm install
+          npm run build
+
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+        continue-on-error: true
+
+  policy-validation:
+    name: APIM Policy Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate XML Syntax
+        run: |
+          sudo apt-get update && sudo apt-get install -y libxml2-utils
+          find bicep/infra/modules/apim/policies -name "*.xml" -type f | while read file; do
+            echo "Validating XML: $file"
+            xmllint --noout "$file" || exit 1
+          done
+
+      - name: Check Policy Fragment Naming
+        run: |
+          echo "Checking policy fragment naming conventions..."
+          find bicep/infra/modules/apim/policies -name "*.xml" -type f | while read file; do
+            basename=$(basename "$file")
+            if [[ ! "$basename" =~ ^frag-citadel-.*\.xml$ ]] && [[ ! "$basename" =~ ^anthropic-api-policy\.xml$ ]]; then
+              echo "::warning::Policy file $basename should follow frag-citadel-*.xml naming convention"
+            fi
+          done

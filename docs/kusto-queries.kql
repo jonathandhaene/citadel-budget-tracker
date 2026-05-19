@@ -1,0 +1,207 @@
+// Kusto queries for Citadel Budgets operational monitoring
+// Save these to your Log Analytics workspace as functions for easy reuse
+
+// Query 1: Users within 10% of monthly budget limit
+let UsersNearBudgetLimit = () {
+  requests
+  | where url contains "anthropic"
+  | where timestamp > ago(1d)
+  | extend budgetPct = todouble(customDimensions["x-citadel-budget-pct"])
+  | extend userOid = tostring(customDimensions.userOid)
+  | extend userUpn = tostring(customDimensions.userUpn)
+  | extend tier = tostring(customDimensions.tier)
+  | extend model = tostring(customDimensions.model)
+  | where budgetPct >= 90
+  | summarize
+      LatestBudgetPct = max(budgetPct),
+      RequestCount = count(),
+      LastSeen = max(timestamp)
+      by userOid, userUpn, tier, model
+  | order by LatestBudgetPct desc
+  | project
+      UserUpn = userUpn,
+      Tier = tier,
+      Model = model,
+      BudgetUsed = strcat(tostring(toint(LatestBudgetPct)), "%"),
+      Remaining = strcat(tostring(100 - toint(LatestBudgetPct)), "%"),
+      LastRequest = LastSeen,
+      RequestCount
+};
+UsersNearBudgetLimit
+
+// Query 2: Tier-sync failures in last 7 days
+let TierSyncFailures = () {
+  traces
+  | where operation_Name == "tier-sync"
+  | where timestamp > ago(7d)
+  | extend
+      tier = tostring(customDimensions.tier),
+      upserted = toint(customDimensions.upserted),
+      demoted = toint(customDimensions.demoted),
+      elapsedMs = toint(customDimensions.elapsedMs)
+  | where severityLevel >= 3  // Error or Critical
+  | project
+      Timestamp = timestamp,
+      SeverityLevel = case(
+          severityLevel == 4, "Critical",
+          severityLevel == 3, "Error",
+          severityLevel == 2, "Warning",
+          "Info"
+      ),
+      Message = message,
+      Tier = tier,
+      Duration = strcat(tostring(elapsedMs / 1000), "s"),
+      Details = customDimensions
+  | order by Timestamp desc
+};
+TierSyncFailures
+
+// Query 3: Budget overruns (users who exceeded 100%)
+let BudgetOverruns = () {
+  requests
+  | where url contains "anthropic"
+  | where timestamp > startofmonth(now())
+  | extend budgetPct = todouble(customDimensions["x-citadel-budget-pct"])
+  | extend userOid = tostring(customDimensions.userOid)
+  | extend userUpn = tostring(customDimensions.userUpn)
+  | extend tier = tostring(customDimensions.tier)
+  | extend resultCode = toint(resultCode)
+  | where budgetPct >= 100 or resultCode == 429
+  | summarize
+      FirstBlocked = min(timestamp),
+      LastBlocked = max(timestamp),
+      TotalBlocked = countif(resultCode == 429),
+      PeakBudgetPct = max(budgetPct)
+      by userOid, userUpn, tier
+  | extend
+      Overrun = PeakBudgetPct - 100,
+      DaysSinceBlock = datetime_diff('day', now(), FirstBlocked)
+  | where Overrun > 0
+  | order by Overrun desc
+  | project
+      UserUpn = userUpn,
+      Tier = tier,
+      Overrun = strcat("+", tostring(toint(Overrun)), "%"),
+      FirstBlockedDate = FirstBlocked,
+      DaysSinceBlock,
+      TotalBlockedRequests = TotalBlocked
+};
+BudgetOverruns
+
+// Query 4: 429 responses by hour (last 7 days)
+let BlockedRequestsByHour = () {
+  requests
+  | where url contains "anthropic"
+  | where timestamp > ago(7d)
+  | where resultCode == 429
+  | extend tier = tostring(customDimensions.tier)
+  | summarize
+      BlockedCount = count(),
+      UniqueUsers = dcount(tostring(customDimensions.userOid))
+      by bin(timestamp, 1h), tier
+  | order by timestamp desc
+  | project
+      Hour = timestamp,
+      Tier = tier,
+      BlockedRequests = BlockedCount,
+      AffectedUsers = UniqueUsers
+};
+BlockedRequestsByHour
+
+// Query 5: APIM → Cosmos latency P95 over time
+let APIMCosmosLatency = () {
+  dependencies
+  | where target contains "cosmos" or target contains "documents.azure"
+  | where timestamp > ago(7d)
+  | where name contains "budget" or name contains "tier"
+  | summarize
+      P50 = percentile(duration, 50),
+      P95 = percentile(duration, 95),
+      P99 = percentile(duration, 99),
+      Count = count()
+      by bin(timestamp, 1h), target
+  | order by timestamp desc
+  | project
+      Hour = timestamp,
+      Target = target,
+      LatencyP50 = strcat(tostring(toint(P50)), "ms"),
+      LatencyP95 = strcat(tostring(toint(P95)), "ms"),
+      LatencyP99 = strcat(tostring(toint(P99)), "ms"),
+      RequestCount = Count
+};
+APIMCosmosLatency
+
+// Query 6: Budget check cache hit rate by hour
+let BudgetCacheHitRate = () {
+  traces
+  | where message contains "budget-check"
+  | where timestamp > ago(7d)
+  | extend cacheHit = tobool(customDimensions.cacheHit)
+  | summarize
+      CacheHits = countif(cacheHit == true),
+      CacheMisses = countif(cacheHit == false)
+      by bin(timestamp, 1h)
+  | extend
+      Total = CacheHits + CacheMisses,
+      HitRate = (CacheHits * 100.0) / (CacheHits + CacheMisses)
+  | order by timestamp desc
+  | project
+      Hour = timestamp,
+      HitRatePercent = strcat(tostring(toint(HitRate)), "%"),
+      Hits = CacheHits,
+      Misses = CacheMisses,
+      Total
+};
+BudgetCacheHitRate
+
+// Query 7: Top users by token consumption (current month)
+let TopUsersByTokens = () {
+  customEvents
+  | where name == "ai-usage"
+  | where timestamp > startofmonth(now())
+  | extend
+      userOid = tostring(customDimensions.userOid),
+      userUpn = tostring(customDimensions.userUpn),
+      tier = tostring(customDimensions.tier),
+      model = tostring(customDimensions.model),
+      totalTokens = toint(customDimensions.totalTokens)
+  | summarize
+      TotalTokens = sum(totalTokens),
+      RequestCount = count(),
+      LastRequest = max(timestamp)
+      by userOid, userUpn, tier, model
+  | order by TotalTokens desc
+  | take 50
+  | project
+      Rank = row_number(),
+      UserUpn = userUpn,
+      Tier = tier,
+      Model = model,
+      TotalTokens,
+      Requests = RequestCount,
+      LastActivity = LastRequest
+};
+TopUsersByTokens
+
+// Query 8: Correlation trace (for debugging specific request)
+let CorrelationTrace = (traceId: string) {
+  union
+    (requests | where customDimensions["x-citadel-trace-id"] == traceId),
+    (traces | where customDimensions["x-citadel-trace-id"] == traceId),
+    (dependencies | where customDimensions["x-citadel-trace-id"] == traceId),
+    (customEvents | where customDimensions["x-citadel-trace-id"] == traceId)
+  | order by timestamp asc
+  | project
+      Timestamp = timestamp,
+      Type = itemType,
+      Operation = operation_Name,
+      Message = coalesce(message, name),
+      Duration = duration,
+      ResultCode = coalesce(tostring(resultCode), tostring(responseCode)),
+      Details = customDimensions
+};
+// Usage: CorrelationTrace("<trace-id>")
+
+// Save each query as a function in Log Analytics workspace
+// Then you can invoke them with simple queries like:
+// UsersNearBudgetLimit | take 10
