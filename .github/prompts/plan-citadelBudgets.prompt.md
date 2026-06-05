@@ -336,3 +336,49 @@ Files:
 - Cost-based budgets (only token-based in POC; conversion lives in PBIX)
 - Multi-region / DR for Cosmos budgets container
 - Audit log of budget changes (IaC commits are the audit trail at POC)
+
+---
+
+## Adjustment (2026-06-05): Microsoft Blog Post Alignment
+
+On 2026-06-05, Microsoft published "[Giving developers Claude Code with Azure API Management and Claude models in Microsoft Foundry](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/giving-developers-claude-code-with-azure-api-management-and-claude-models-in-mic/4525212)" (Azure AI Foundry blog). This post documents the **official Microsoft guidance** for deploying Claude Code against Foundry-hosted Anthropic models. We reviewed our Citadel Budgets design against this post to validate alignment and identify gaps.
+
+### Findings: What We Already Have Correct
+
+| Aspect | Microsoft Guidance | Citadel Budgets Status |
+|--------|-------------------|------------------------|
+| **Foundry Endpoint Structure** | `/anthropic/v1/messages` path | ✅ Correct. Our APIM API uses `/anthropic` prefix, policy forwards to `<foundry>/anthropic/v1` (see [`anthropic-api.bicep:8`](../../bicep/infra/modules/apim/anthropic/anthropic-api.bicep#L8)) |
+| **Authentication (backend)** | APIM → Foundry via Managed Identity with `resource=https://cognitiveservices.azure.com` | ✅ Correct. See [`anthropic-api-policy.xml:43`](../../bicep/infra/modules/apim/policies/anthropic-api-policy.xml#L43) |
+| **Model Deployment Names** | Foundry deployments should use Claude Code's expected names (`claude-sonnet-4-5`, `claude-haiku-4-5`, `claude-opus-4-5`) | ✅ Correct by design. Our policy captures `model` from request body for telemetry/budget lookup. Deployment names are an admin concern; we document them in the new Foundry config guide (see below). |
+| **Streaming SSE** | Terminal `message_delta` event carries `usage.output_tokens` | ✅ Correct. [`frag-citadel-anthropic-usage-streaming.xml`](../../bicep/infra/modules/apim/policies/frag-citadel-anthropic-usage-streaming.xml) already parses this event. |
+| **Token Usage Fields** | Anthropic uses `usage.input_tokens` + `usage.output_tokens` (not OpenAI's `usage.total_tokens`) | ✅ Correct. Our usage fragments map these to existing Event Hub schema (`promptTokens` / `responseTokens` / `totalTokens`). See [`frag-citadel-anthropic-usage.xml`](../../bicep/infra/modules/apim/policies/frag-citadel-anthropic-usage.xml). |
+
+### Findings: What Was Missing (Now Added)
+
+| # | Gap Identified | What We Added | Location |
+|---|----------------|---------------|----------|
+| 1 | **End-user setup documentation** for Claude Code environment variables (`ANTHROPIC_BASE_URL`, credential chain, model overrides) | Complete developer setup guide covering env vars, authentication modes, budget headers, troubleshooting | [`docs/CLAUDE-CODE-SETUP.md`](../../docs/CLAUDE-CODE-SETUP.md) |
+| 2 | **Admin deployment guide** for Foundry with recommended deployment names, APIM MI role assignment, endpoint structure | Comprehensive Foundry deployment config guide aligned with Microsoft's blog, including az CLI examples | [`docs/FOUNDRY-DEPLOYMENT-CONFIG.md`](../../docs/FOUNDRY-DEPLOYMENT-CONFIG.md) |
+| 3 | **Dual authentication modes** (API key vs Entra credential chain) — blog explains Claude Code's fallback behavior | Documented in setup guide; confirmed Citadel's Entra-only mode is valid; API key mode deliberately not supported (defeats per-user budgeting) | [`docs/CLAUDE-CODE-SETUP.md#step-2-configure-authentication`](../../docs/CLAUDE-CODE-SETUP.md#step-2-configure-authentication) |
+| 4 | **Default model deployment names** — blog specifies exact names Claude Code expects | Added table of recommended deployment names + consequences of using non-standard names (env var overrides required) | [`docs/FOUNDRY-DEPLOYMENT-CONFIG.md#2-claude-model-deployment-names`](../../docs/FOUNDRY-DEPLOYMENT-CONFIG.md#2-claude-model-deployment-names) |
+| 5 | **Billing and free credits caveat** — some Azure free credits do not cover third-party (Anthropic) Foundry models | Documented in both guides as a callout for admins | [`docs/FOUNDRY-DEPLOYMENT-CONFIG.md#5-foundry-specific-considerations-for-citadel`](../../docs/FOUNDRY-DEPLOYMENT-CONFIG.md#5-foundry-specific-considerations-for-citadel) |
+
+### Design Validation
+
+The blog post validates our **Phase 0.a decision** (Path B: dedicated `/anthropic` API). Microsoft's guidance explicitly shows a separate Anthropic endpoint path (`/anthropic/v1`) rather than attempting to unify OpenAI and Anthropic under a single normalized surface. This confirms our rationale:
+
+> **Decision (2026-05-13, paper-only)**: Path B — dedicated `/anthropic` API.
+> **Rationale**: Anthropic Messages API is structurally distinct from OpenAI Chat Completions. Foundry itself surfaces them as distinct paths (`/openai/v1/` vs `/anthropic/v1/`). Forcing normalization risks lossy passthrough.
+
+The blog also confirms **D1 (Identity)**: Claude Code natively supports Azure credential chain and sends Entra JWT in the `Authorization` header when `ANTHROPIC_API_KEY` is unset. Our pass-through JWT approach is architecturally sound.
+
+### No Changes to Locked Decisions
+
+The blog post required **zero changes** to decisions D1–D6. It provided **operational detail** (deployment names, env vars, Foundry CLI commands) that was implicit in our design but not yet documented for end-users and admins.
+
+### References
+
+- Blog post: [Giving developers Claude Code with Azure API Management and Claude models in Microsoft Foundry](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/giving-developers-claude-code-with-azure-api-management-and-claude-models-in-mic/4525212)
+- New guide: [Claude Code Setup](../../docs/CLAUDE-CODE-SETUP.md)
+- New guide: [Foundry Deployment Configuration](../../docs/FOUNDRY-DEPLOYMENT-CONFIG.md)
+- README updated: Added §5a referencing both guides ([README.md#L123-L128](../../README.md#L123-L128))
