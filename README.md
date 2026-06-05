@@ -120,6 +120,13 @@ A typical CCoE / AI CoE engagement with this overlay follows four steps:
 3. **Trace one request.** Walk [CITADEL-OVERLAY.md §7](CITADEL-OVERLAY.md#7-logging--telemetry-architecture-end-to-end-example) — the end-to-end logging architecture with a worked example — so your operations team knows exactly which logs to pull when a user calls support saying "I got a 429".
 4. **Run the gates.** Execute the two notebooks under [`validation/`](validation/) against a paper deployment. Green = ready to pilot.
 
+## 5a. Deployment and Setup Guides
+
+Detailed guides for deployment and developer onboarding:
+
+- **[Claude Code Setup Guide](docs/CLAUDE-CODE-SETUP.md)** — End-user guide for developers connecting Claude Code to the Citadel-governed APIM gateway. Covers environment variables, authentication modes, budget monitoring, and troubleshooting.
+- **[Foundry Deployment Configuration](docs/FOUNDRY-DEPLOYMENT-CONFIG.md)** — Admin guide for deploying Claude models in Microsoft Foundry with correct naming conventions, endpoint structure, and APIM integration. Based on [Microsoft's official blog post](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/giving-developers-claude-code-with-azure-api-management-and-claude-models-in-mic/4525212).
+
 ## 6. Status
 
 This repository is **paper-only**. No live Azure tenant is yet provisioned. All `<placeholder>` values in Bicep are intentional — they become parameters / Named Values at deploy time. The repo's purpose is design-review, customer alignment, and pre-implementation sign-off.
